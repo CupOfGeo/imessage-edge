@@ -1,0 +1,43 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      - id: ruff-format
+        name: "ruff format"
+        entry: uvx ruff@0.15.13 format
+        language: system
+        pass_filenames: false
+        files: \.py$
+
+      - id: ruff-lint
+        name: "ruff lint"
+        entry: uvx ruff@0.15.13 check --fix
+        language: system
+        pass_filenames: false
+        files: \.py$
+
+      - id: ty-check
+        name: "ty type check"
+        entry: uvx ty@0.0.75 check
+        language: system
+        pass_filenames: false
+        files: \.py$
+
+      - id: pytest
+        name: "pytest"
+        entry: uv run --frozen pytest -q
+        language: system
+        pass_filenames: false
+        files: \.py$

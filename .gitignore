@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.venv
+.ruff_cache/
+
+# Env files
+.env*
+!.env.example
+
+# Daemon state (default IMESSAGE_EDGE_STATE_DIR is ~/.imessage-edge, but
+# keep a local override out of the tree too)
+.imessage-edge/
+
+# OS
+.DS_Store
