@@ -1,6 +1,6 @@
 [project]
 name = "imessage-edge"
-version = "0.4.0"
+version = "0.5.0"
 description = "Mac-side HTTP daemon exposing iMessage send/read to a remote orchestrator"
 readme = "README.md"
 license = "MIT"

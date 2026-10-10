@@ -7,8 +7,8 @@
 // Takes no arguments and no environment: everything an attacker could
 // steer through `launchctl setenv` is fixed at build time. EDGE_PYTHON
 // (venv interpreter) and EDGE_CONFIG (config.env path) are passed as
-// -D string macros by the Homebrew formula. Sign with
-// `codesign -s - -o runtime` so dyld ignores DYLD_* variables.
+// -D string macros by build.sh, which also signs the ImessageEdge.app
+// bundle with Developer ID and the hardened runtime (dyld ignores DYLD_*).
 #include <errno.h>
 #include <pwd.h>
 #include <signal.h>

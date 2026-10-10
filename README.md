@@ -63,7 +63,7 @@ daemon. Grant it.
 For reading: grant Full Disk Access to the process (System Settings →
 Privacy & Security → Full Disk Access). Without it, `chat.db` is
 unreadable and `/health` reports `chat_db_readable: false`. Homebrew
-installs grant it to the `imessage-edged` launcher, not to Python; see
+installs grant it once to `ImessageEdge.app`, not to Python; see
 `PACKAGING.md`.
 
 ## Endpoints

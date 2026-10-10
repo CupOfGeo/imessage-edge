@@ -26,8 +26,8 @@ before starting the service. Caveat printed during install spells this out.
 
 A few things in the formula look weird; here's why.
 
-### A compiled launcher holds Full Disk Access, not Python
-`imessage-edged` is a small C program (`launcher/imessage-edged.c`)
+### A signed launcher app holds Full Disk Access, not Python
+`ImessageEdge.app` wraps a small C program (`launcher/imessage-edged.c`)
 that launchd runs. It spawns the venv's python as a child, and macOS
 attributes the child's chat.db reads to the launcher: TCC checks the
 *responsible* process, and a child inherits its parent's. Python itself
@@ -37,12 +37,24 @@ responsible process and had no grant.)
 
 The launcher takes no arguments and ignores its environment, because
 `launchctl setenv` reaches every job launchd starts for the user. The
-python path and `IMESSAGE_EDGE_CONFIG` are compiled in by the formula,
+python path and `IMESSAGE_EDGE_CONFIG` are compiled in (the stable
+`/opt/homebrew/opt` paths, so Apple Silicon and the default prefix only),
 `HOME` comes from the user database, and python runs with `-I` so
 `PYTHON*` variables are ignored. A config path taken from the environment
-would let anyone point the daemon at their own `ORCHESTRATOR_URL`. The
-binary is ad-hoc signed with the hardened runtime (`-o runtime`) so dyld
-ignores `DYLD_*` variables.
+would let anyone point the daemon at their own `ORCHESTRATOR_URL`.
+
+### Built and notarized at release time, not by the formula
+A Homebrew install can't sign with our Developer ID, so
+`launcher/build.sh` builds the bundle on the release Mac, signs it with
+the Developer ID Application certificate and the hardened runtime (dyld
+then ignores `DYLD_*`), notarizes and staples it. `publish-snapshot.sh`
+attaches the zip to the GitHub release and writes its url + sha256 into
+the formula's `launcher` resource. The formula only unpacks it.
+
+Developer ID is what makes the grant survive upgrades: for a signed
+bundle, TCC keys the grant on its code requirement (bundle id + Team ID),
+not on the path or hash. An ad-hoc copy claiming the same bundle id gets
+nothing.
 
 What it does not stop: the Cellar is writable by your user, so a process
 running as you can still edit the daemon's site-packages or replace the
@@ -78,6 +90,10 @@ git tag -a vX.Y.Z
 git push origin vX.Y.Z
 
 # 3. Publish the public snapshot + GitHub release, then bump the tap.
+#    Needs, on this Mac: the Developer ID Application certificate and a
+#    `notary` notarytool profile (`xcrun notarytool store-credentials`;
+#    the Team ID is the OU of the certificate subject, not the ID in its
+#    name). It builds + notarizes the launcher before pushing anything.
 #    Builds a filtered single commit from the tag (exclude list:
 #    scripts/snapshot-exclude.txt), refuses to ship if any internal string
 #    survives or the working tree is dirty, pushes it to
@@ -94,14 +110,10 @@ scripts/publish-snapshot.sh
 brew tap CupOfGeo/tap ~/Code/homebrew-tap   # if not already tapped from local path
 brew update-python-resources CupOfGeo/tap/imessage-edge
 
-# 5. Local reinstall + re-grant FDA + restart
+# 5. Local upgrade + restart (the FDA grant carries over)
 brew update
-brew services stop CupOfGeo/tap/imessage-edge
 brew upgrade CupOfGeo/tap/imessage-edge
-# Grant FDA to the new path: System Settings -> Privacy & Security -> FDA
-#   /opt/homebrew/Cellar/imessage-edge/X.Y.Z/libexec/bin/imessage-edged
-# (Old version's entry is now orphaned — `-` to remove.)
-brew services start CupOfGeo/tap/imessage-edge
+brew services restart CupOfGeo/tap/imessage-edge
 ```
 
 Step 3 is everything a release action would run on tag push; it is
@@ -133,19 +145,14 @@ uninstall by design; remove it by hand if you want a clean slate.
 The daemon needs FDA to read `~/Library/Messages/chat.db`. macOS only
 exposes broad FDA — no per-file granular scoping. Apple's design.
 
-**Grant target:**
+**Grant target, once:**
 ```
-/opt/homebrew/Cellar/imessage-edge/<version>/libexec/bin/imessage-edged
+/opt/homebrew/opt/imessage-edge/libexec/ImessageEdge.app
 ```
-Toggle ON in System Settings → Privacy & Security → Full Disk Access.
-The list will show it as `imessage-edged`.
-
-**Re-grant on every brew upgrade.** macOS records FDA against the
-resolved versioned cellar path + the binary's CDHash. Each rebuild
-rotates the hash and changes the path; TCC silently drops the grant.
-This is a fundamental limitation of ad-hoc-signed binaries. The "right"
-fix is signing the launcher with a stable identity, but that's a bigger
-lift.
+In System Settings → Privacy & Security → Full Disk Access, click `+`,
+press ⌘⇧G, paste the path above and pick `ImessageEdge.app`. The grant
+survives `brew upgrade` (see above), so there's nothing to redo after
+a release.
 
 **Verifying FDA in isolation.** Anything spawned from your shell (including
 `osascript … do shell script`) inherits the terminal's FDA via macOS's
@@ -160,8 +167,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8765/health
 ```
 
 `"chat_db_readable": true` means the grant is real. `false` means it
-isn't (wrong row toggled, stale entry for an old Cellar path, or not
-added yet). Use your bind address if you changed `IMESSAGE_EDGE_BIND_HOST`.
+isn't (wrong row toggled, or not added yet). Use your bind address if you changed `IMESSAGE_EDGE_BIND_HOST`.
 
 To confirm Python itself can't use the grant, run it under launchd
 directly. It must fail with `unable to open database file`:
@@ -172,10 +178,3 @@ launchctl submit -l fdatest -o /tmp/fdatest.out -e /tmp/fdatest.out -- "$P" -c \
   "import sqlite3,os; sqlite3.connect('file:'+os.path.expanduser('~/Library/Messages/chat.db')+'?mode=ro', uri=True).execute('select 1 from message')"
 sleep 3; tail -1 /tmp/fdatest.out; launchctl remove fdatest
 ```
-
-## Known issues
-
-- **FDA list accumulates orphans.** Every reinstall leaves a stale FDA
-  entry for the previous cellar version (different CDHash, brew can't
-  clean these up). Manual cleanup: System Settings → FDA → click old
-  entry → `−` button → authenticate.
