@@ -24,5 +24,5 @@ async def require_edge_token(authorization: str | None = Header(default=None)) -
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
     presented = authorization.removeprefix("Bearer ").strip()
-    if not hmac.compare_digest(presented, expected):
+    if not hmac.compare_digest(presented.encode(), expected.encode()):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)

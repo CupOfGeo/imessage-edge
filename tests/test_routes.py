@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from imessage_edge import __version__
 from imessage_edge.chat_db import ChatSummary, Message
+from imessage_edge.contracts import MAX_BODY_CHARS
 from imessage_edge.routes import health as health_route
 from imessage_edge.routes import messages as messages_route
 from imessage_edge.routes import send as send_route
@@ -30,6 +31,17 @@ def test_health_wrong_token_401(client: TestClient) -> None:
 def test_health_non_bearer_scheme_401(client: TestClient) -> None:
     r = client.get("/health", headers={"Authorization": "Basic dGVzdA=="})
     assert r.status_code == 401
+
+
+def test_health_non_ascii_token_401(client: TestClient) -> None:
+    # compare_digest raises TypeError on non-ASCII str; must not surface as 500.
+    r = client.get("/health", headers={b"Authorization": b"Bearer \xe9"})
+    assert r.status_code == 401
+
+
+@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
+def test_schema_pages_not_served(client: TestClient, path: str) -> None:
+    assert client.get(path).status_code == 404
 
 
 def test_health_503_when_token_not_configured(
@@ -438,11 +450,53 @@ def test_send_and_send_to_chat_share_idempotency_namespace(
     first = client.post(
         "/imessage/send", json=_send_body(request_id="shared"), headers=auth
     )
-    replay = client.post(
+    reuse = client.post(
         "/imessage/send-to-chat", json=_chat_body(request_id="shared"), headers=auth
     )
-    assert first.status_code == replay.status_code == 200
-    assert first.json() == replay.json()
+    assert first.status_code == 200
+    assert reuse.status_code == 409
+    assert reuse.json()["code"] == "request_id_conflict"
+
+
+def test_send_reused_request_id_with_different_body_409(
+    client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(send_route, "send_message", lambda r, b, s: calls.append(b))
+    first = client.post("/imessage/send", json=_send_body(), headers=auth)
+    second = client.post("/imessage/send", json=_send_body(body="other"), headers=auth)
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert "different request" in second.json()["message"]
+    assert calls == ["hello"]
+    # The original outcome is still replayable.
+    third = client.post("/imessage/send", json=_send_body(), headers=auth)
+    assert third.json() == first.json()
+
+
+def test_send_concurrent_duplicate_409_without_second_send(
+    client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[int] = []
+
+    def send_while_duplicate_arrives(r: str, b: str, s: str) -> None:
+        calls.append(1)
+        dup = client.post("/imessage/send", json=_send_body(), headers=auth)
+        assert dup.status_code == 409
+        assert "in flight" in dup.json()["message"]
+
+    monkeypatch.setattr(send_route, "send_message", send_while_duplicate_arrives)
+    r = client.post("/imessage/send", json=_send_body(), headers=auth)
+    assert r.status_code == 200
+    assert calls == [1]
+
+
+def test_send_body_over_limit_422(client: TestClient, auth: dict[str, str]) -> None:
+    body = "x" * (MAX_BODY_CHARS + 1)
+    r = client.post("/imessage/send", json=_send_body(body=body), headers=auth)
+    assert r.status_code == 422
+    r = client.post("/imessage/send-to-chat", json=_chat_body(body=body), headers=auth)
+    assert r.status_code == 422
 
 
 # ---------------------------------------------------------------------------
@@ -450,22 +504,21 @@ def test_send_and_send_to_chat_share_idempotency_namespace(
 # ---------------------------------------------------------------------------
 
 
-def test_idempotency_cache_prunes_expired_entries_on_write(
+def test_idempotency_cache_prunes_expired_entries_on_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = {"now": 1_000.0}
     monkeypatch.setattr(send_route.time, "time", lambda: clock["now"])
 
-    send_route._idem_set("old", 200, {"a": 1})
+    assert send_route._idem_claim("old", {"a": 1}) is None
     clock["now"] += send_route._IDEM_TTL_SEC - 1
-    send_route._idem_set("fresh", 200, {"b": 2})
+    assert send_route._idem_claim("fresh", {"b": 2}) is None
     assert set(send_route._idem) == {"old", "fresh"}  # old not yet expired
 
     clock["now"] += 1  # old is now exactly TTL old
-    send_route._idem_set("newest", 200, {"c": 3})
+    assert send_route._idem_claim("newest", {"c": 3}) is None
     assert set(send_route._idem) == {"fresh", "newest"}
-    assert send_route._idem_get("old") is None
-    assert send_route._idem_get("fresh") == (200, {"b": 2})
+    assert send_route._idem_claim("old", {"z": 9}) is None  # free to reuse
 
 
 def test_idempotency_cache_stays_bounded_over_many_sends(

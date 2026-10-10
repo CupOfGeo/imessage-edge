@@ -30,11 +30,12 @@ from imessage_edge.logging import log
 router = APIRouter()
 
 
-# Idempotency cache: request_id → (cached_at_unix, status_code, body_dict).
-# In-memory; lost on restart. ~120s TTL is enough to cover orchestrator
-# retries without growing unbounded.
+# Idempotency cache: request_id → (claimed_at_unix, request, status, body).
+# status/body are None while the send is in flight. In-memory; lost on
+# restart. ~120s TTL is enough to cover orchestrator retries without
+# growing unbounded.
 _IDEM_TTL_SEC = 120
-_idem: dict[str, tuple[float, int, dict]] = {}
+_idem: dict[str, tuple[float, dict, int | None, dict | None]] = {}
 _idem_lock = threading.Lock()
 
 
@@ -52,23 +53,45 @@ def _classify(stderr_or_msg: str) -> SendErrorCode:
     return SendErrorCode.APPLESCRIPT_ERROR
 
 
-def _idem_get(request_id: str) -> tuple[int, dict] | None:
+def _idem_claim(request_id: str, request: dict) -> JSONResponse | None:
+    """Reserve ``request_id`` for this request, atomically.
+
+    Returns ``None`` when the caller now owns the id and should send.
+    Otherwise returns the response to give instead: the cached outcome
+    for a replay, or 409 when the id is still in flight or was used for
+    a different request. A 409 is never cached.
+    """
+    now = time.time()
     with _idem_lock:
-        cached = _idem.get(request_id)
-        if cached and time.time() - cached[0] < _IDEM_TTL_SEC:
-            return cached[1], cached[2]
-    return None
+        # Sweep expired entries on every claim so the cache stays bounded
+        # by the number of sends in the last TTL window, not by uptime.
+        expired = [k for k, e in _idem.items() if now - e[0] >= _IDEM_TTL_SEC]
+        for k in expired:
+            del _idem[k]
+        entry = _idem.get(request_id)
+        if entry is None:
+            _idem[request_id] = (now, request, None, None)
+            return None
+    _, cached_request, status, body = entry
+    if cached_request != request:
+        msg = "request_id already used for a different request"
+    elif status is None or body is None:
+        msg = "request_id already in flight"
+    else:
+        log.info("imessage.send.idempotent_hit", request_id=request_id)
+        return JSONResponse(status_code=status, content=body)
+    log.warning("imessage.send.request_id_conflict", request_id=request_id, reason=msg)
+    conflict = SendErrorResponse(
+        request_id=request_id, code=SendErrorCode.REQUEST_ID_CONFLICT, message=msg
+    )
+    return JSONResponse(status_code=409, content=conflict.model_dump(mode="json"))
 
 
 def _idem_set(request_id: str, status: int, body: dict) -> None:
-    now = time.time()
     with _idem_lock:
-        # Sweep expired entries on every write so the cache stays bounded
-        # by the number of sends in the last TTL window, not by uptime.
-        expired = [k for k, (at, _, _) in _idem.items() if now - at >= _IDEM_TTL_SEC]
-        for k in expired:
-            del _idem[k]
-        _idem[request_id] = (now, status, body)
+        # The claim can't have expired: the TTL outlives osascript's 60s timeout.
+        claimed_at, request, _, _ = _idem[request_id]
+        _idem[request_id] = (claimed_at, request, status, body)
 
 
 def _error(request_id: str, status: int, code: SendErrorCode, msg: str) -> JSONResponse:
@@ -80,7 +103,7 @@ def _error(request_id: str, status: int, code: SendErrorCode, msg: str) -> JSONR
 
 
 def _run_send(
-    request_id: str, target: str, attempt: Callable[[], SendResponse]
+    req: SendRequest | SendToChatRequest, attempt: Callable[[], SendResponse]
 ) -> JSONResponse:
     """Idempotency + error mapping around one send attempt.
 
@@ -88,34 +111,30 @@ def _run_send(
     raise ``_ChatNotFound`` (404), ``ValueError`` (422) or ``RuntimeError``
     from osascript (502, classified). Every outcome is cached by request id.
     """
-    cached = _idem_get(request_id)
-    if cached is not None:
-        status, body = cached
-        log.info("imessage.send.idempotent_hit", request_id=request_id)
-        return JSONResponse(status_code=status, content=body)
+    request_id = req.request_id
+    claimed = _idem_claim(request_id, req.model_dump(mode="json"))
+    if claimed is not None:
+        return claimed
 
     try:
         resp = attempt()
     except _ChatNotFound as exc:
-        log.warning(
-            "imessage.send.chat_not_found", request_id=request_id, chat=str(exc)
-        )
+        log.warning("imessage.send.chat_not_found", request_id=request_id)
         return _error(
             request_id, 404, SendErrorCode.CHAT_NOT_FOUND, f"no chat with id {exc}"
         )
     except ValueError as exc:
         return _error(request_id, 422, SendErrorCode.INTERNAL, str(exc))
     except RuntimeError as exc:
-        log.warning(
-            "imessage.send.applescript_error", request_id=request_id, error=str(exc)
-        )
-        return _error(request_id, 502, _classify(str(exc)), str(exc))
+        # Code only: osascript stderr can echo the recipient. The caller
+        # still gets the full text in the response.
+        code = _classify(str(exc))
+        log.warning("imessage.send.applescript_error", request_id=request_id, code=code)
+        return _error(request_id, 502, code, str(exc))
 
     body = resp.model_dump(mode="json")
     _idem_set(request_id, 200, body)
-    log.info(
-        "imessage.send.ok", request_id=request_id, target=target, service=resp.sent_via
-    )
+    log.info("imessage.send.ok", request_id=request_id, service=resp.sent_via)
     return JSONResponse(status_code=200, content=body)
 
 
@@ -134,7 +153,7 @@ def send(req: SendRequest, _: None = Depends(require_edge_token)) -> JSONRespons
             request_id=req.request_id, sent_via=req.service, detail=detail
         )
 
-    return _run_send(req.request_id, req.recipient, attempt)
+    return _run_send(req, attempt)
 
 
 @router.post("/imessage/send-to-chat")
@@ -153,4 +172,4 @@ def send_to_chat_route(
             detail=f"Sent to chat {req.chat_id} via {service}.",
         )
 
-    return _run_send(req.request_id, req.chat_id, attempt)
+    return _run_send(req, attempt)

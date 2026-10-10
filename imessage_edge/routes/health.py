@@ -15,7 +15,7 @@ router = APIRouter()
 
 
 @router.get("/health", response_model=HealthResponse)
-async def health(_: None = Depends(require_edge_token)) -> HealthResponse:
+def health(_: None = Depends(require_edge_token)) -> HealthResponse:
     return HealthResponse(
         macos_version=platform.mac_ver()[0] or "unknown",
         chat_db_readable=is_available(),

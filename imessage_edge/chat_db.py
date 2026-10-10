@@ -208,7 +208,7 @@ def send_message(recipient: str, body: str, service: str = "iMessage") -> None:
         send "{b}" to targetBuddy
     end tell
     '''
-    log.info("imessage.send", recipient=recipient, service=service)
+    log.info("imessage.send", recipient=f"…{recipient[-4:]}", service=service)
     run_applescript(script)
 
 
@@ -263,7 +263,7 @@ def send_to_chat(chat_guid: str, body: str) -> None:
         send "{b}" to chat id "{g}"
     end tell
     '''
-    log.info("imessage.send_to_chat", chat_guid=chat_guid)
+    log.info("imessage.send_to_chat", chat_guid=f"…{chat_guid[-4:]}")
     run_applescript(script)
 
 

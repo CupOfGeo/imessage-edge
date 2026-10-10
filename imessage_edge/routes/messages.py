@@ -38,7 +38,7 @@ def _to_message_row(m: Message) -> MessageRow:
 
 
 @router.get("/messages", response_model=RecentMessagesResponse)
-async def messages(
+def messages(
     contact: str | None = Query(
         default=None,
         description="Direct (1:1) conversation with this handle. Alias for chat_id.",
@@ -60,7 +60,7 @@ async def messages(
 
 
 @router.get("/chats", response_model=ChatsResponse)
-async def chats(
+def chats(
     limit: int = Query(default=50, ge=1, le=500),
     _: None = Depends(require_edge_token),
 ) -> ChatsResponse:
@@ -81,7 +81,7 @@ async def chats(
 
 
 @router.get("/search", response_model=SearchResponse)
-async def search(
+def search(
     query: str = Query(min_length=1),
     contact: str | None = Query(
         default=None,
@@ -104,7 +104,7 @@ async def search(
 
 
 @router.get("/last-inbound-service", response_model=LastInboundServiceResponse)
-async def last_inbound_service(
+def last_inbound_service(
     handle: str = Query(min_length=1),
     _: None = Depends(require_edge_token),
 ) -> LastInboundServiceResponse:

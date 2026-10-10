@@ -42,7 +42,7 @@ uv run python -m imessage_edge
 |---|---|
 | `IMESSAGE_EDGE_TOKEN` | Bearer token the orchestrator presents on every call to this daemon |
 | `IMESSAGE_INBOUND_TOKEN` | Bearer token this daemon presents to the orchestrator on `POST /events/imessage` |
-| `ORCHESTRATOR_URL` | Base URL of the orchestrator API |
+| `ORCHESTRATOR_URL` | Base URL of the orchestrator API. `http://` sends `IMESSAGE_INBOUND_TOKEN` in cleartext, so only use it over Tailscale |
 
 Optional:
 
@@ -62,7 +62,9 @@ daemon. Grant it.
 
 For reading: grant Full Disk Access to the process (System Settings →
 Privacy & Security → Full Disk Access). Without it, `chat.db` is
-unreadable and `/health` reports `chat_db_readable: false`.
+unreadable and `/health` reports `chat_db_readable: false`. Homebrew
+installs grant it to the `imessage-edged` launcher, not to Python; see
+`PACKAGING.md`.
 
 ## Endpoints
 
@@ -79,8 +81,8 @@ All endpoints require `Authorization: Bearer $IMESSAGE_EDGE_TOKEN`.
 | `GET` | `/imessage/search?query=&limit=&contact=\|chat_id=` | — | Case-insensitive substring search over message bodies (incl. `attributedBody`); optional scope to one chat |
 | `GET` | `/imessage/last-inbound-service?handle=` | — | Service of last inbound from `handle` |
 
-Wire schemas live in `imessage_edge/contracts.py`. The running daemon
-also serves them as OpenAPI at `/openapi.json`.
+Wire schemas live in `imessage_edge/contracts.py`. The daemon does not
+serve `/docs` or `/openapi.json`; those would bypass the bearer check.
 
 ## Orchestrator contract
 

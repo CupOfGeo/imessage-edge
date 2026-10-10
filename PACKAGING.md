@@ -26,32 +26,28 @@ before starting the service. Caveat printed during install spells this out.
 
 A few things in the formula look weird; here's why.
 
-### Renamed Python stub: `python3.14` → `imessage-edged`
-Inside the brew venv, the Python interpreter is renamed so macOS Full
-Disk Access shows the daemon as `imessage-edged` rather than a generic
-`python` / `python3.14`. Compat symlinks (`python`, `python3`,
-`python3.14`) point at it so dep CLIs (uvicorn etc.) still resolve their
-shebangs. The daemon's own entry-script shebang was rewritten to bypass
-the symlink so launchd execs `imessage-edged` directly (TCC attributes
-FDA grants to the path used to exec, not the resolved Mach-O).
+### A compiled launcher holds Full Disk Access, not Python
+`imessage-edged` is a small C program (`launcher/imessage-edged.c`)
+that launchd runs. It spawns the venv's python as a child, and macOS
+attributes the child's chat.db reads to the launcher: TCC checks the
+*responsible* process, and a child inherits its parent's. Python itself
+gets no grant, so `launchctl submit … python -c <code>` can't borrow FDA.
+(This is also why an earlier bash wrapper failed: bash was the
+responsible process and had no grant.)
 
-### `--copies` venv (not symlink)
-Built with `python -m venv --copies` so the stub is a real Mach-O copy,
-not a symlink to the shared Homebrew framework binary. Granting FDA
-scopes access to *this* daemon's binary alone, not every brew-managed
-Python 3.14 invocation on the system.
+The launcher takes no arguments and ignores its environment, because
+`launchctl setenv` reaches every job launchd starts for the user. The
+python path and `IMESSAGE_EDGE_CONFIG` are compiled in by the formula,
+`HOME` comes from the user database, and python runs with `-I` so
+`PYTHON*` variables are ignored. A config path taken from the environment
+would let anyone point the daemon at their own `ORCHESTRATOR_URL`. The
+binary is ad-hoc signed with the hardened runtime (`-o runtime`) so dyld
+ignores `DYLD_*` variables.
 
-### No bash launcher
-launchd runs the `imessage-edge` Python entry point directly. An earlier
-attempt put a bash wrapper in between (to source `config.env`) but
-macOS's "responsible process" attribution made TCC deny the chat.db
-read. Now the service block sets `IMESSAGE_EDGE_CONFIG=/opt/homebrew/etc/imessage-edge/config.env`
-in launchd's `EnvironmentVariables`; pydantic-settings reads the env
-file from that path on its own.
-
-### Manual venv (not `virtualenv_install_with_resources`)
-The formula builds the venv by hand so it can pass `--copies` (see
-above) before installing the package with `pip_install_and_link`.
+What it does not stop: the Cellar is writable by your user, so a process
+running as you can still edit the daemon's site-packages or replace the
+launcher, and the change takes effect on the next restart. Closing that
+needs a root-owned install, which Homebrew doesn't do.
 
 ### `[build-system] = hatchling`
 Required so `pip install .` registers the `imessage-edge` console
@@ -81,44 +77,35 @@ git push
 git tag -a vX.Y.Z
 git push origin vX.Y.Z
 
-# 3. Publish the public snapshot + GitHub release. Builds a filtered
-#    single commit from the tag (exclude list: scripts/snapshot-exclude.txt),
-#    refuses to ship if any internal string survives, pushes it to
-#    github.com/CupOfGeo/imessage-edge, creates the release, and prints
-#    the tarball sha256 for the formula. Run with --dry-run first.
-#    The formula must hash the *GitHub* tarball, not the Forgejo one:
-#    the snapshot excludes internal files, so the digests differ.
+# 3. Publish the public snapshot + GitHub release, then bump the tap.
+#    Builds a filtered single commit from the tag (exclude list:
+#    scripts/snapshot-exclude.txt), refuses to ship if any internal string
+#    survives or the working tree is dirty, pushes it to
+#    github.com/CupOfGeo/imessage-edge, creates the release, then rewrites
+#    the formula's url + sha256 in github.com/CupOfGeo/homebrew-tap and
+#    pushes that too. Run with --dry-run first (stops before any push).
+#    The formula hashes the *GitHub* tarball, not the Forgejo one: the
+#    snapshot excludes internal files, so the digests differ.
 scripts/publish-snapshot.sh --dry-run   # tag is read from HEAD
 scripts/publish-snapshot.sh
 
-# 4. Update formula in the tap repo
-$EDITOR ~/Code/homebrew-tap/Formula/imessage-edge.rb
-#   - url:     bump version
-#   - sha256:  paste the new digest
-
-# 5. (Optional) refresh transitive Python dep pins
+# 4. (Optional, when Python deps changed) refresh the formula's resource
+#    pins, then commit and push the tap by hand
 brew tap CupOfGeo/tap ~/Code/homebrew-tap   # if not already tapped from local path
 brew update-python-resources CupOfGeo/tap/imessage-edge
 
-# 6. Push the tap
-cd ~/Code/homebrew-tap
-git add Formula/imessage-edge.rb
-git commit -m "imessage-edge: vX.Y.Z"
-git push
-
-# 7. Local reinstall + re-grant FDA + restart
+# 5. Local reinstall + re-grant FDA + restart
+brew update
 brew services stop CupOfGeo/tap/imessage-edge
-brew uninstall imessage-edge
-brew install CupOfGeo/tap/imessage-edge
+brew upgrade CupOfGeo/tap/imessage-edge
 # Grant FDA to the new path: System Settings -> Privacy & Security -> FDA
 #   /opt/homebrew/Cellar/imessage-edge/X.Y.Z/libexec/bin/imessage-edged
 # (Old version's entry is now orphaned — `-` to remove.)
 brew services start CupOfGeo/tap/imessage-edge
 ```
 
-Steps 3–6 are the part the release action is meant to absorb: it runs
-`publish-snapshot.sh` on tag push, then commits the formula bump to the
-tap. Until then steps 4–6 are manual.
+Step 3 is everything a release action would run on tag push; it is
+manual for now.
 
 The tap repo on GitHub is the source of truth; the working copy at
 `/opt/homebrew/Library/Taps/cupofgeo/homebrew-tap/` can be edited
@@ -156,28 +143,35 @@ The list will show it as `imessage-edged`.
 **Re-grant on every brew upgrade.** macOS records FDA against the
 resolved versioned cellar path + the binary's CDHash. Each rebuild
 rotates the hash and changes the path; TCC silently drops the grant.
-This is a fundamental limitation of ad-hoc-signed binaries (Homebrew's
-Python isn't Apple Developer ID signed). The "right" fix is signing the
-binary with a stable identity, but that's a bigger lift.
+This is a fundamental limitation of ad-hoc-signed binaries. The "right"
+fix is signing the launcher with a stable identity, but that's a bigger
+lift.
 
 **Verifying FDA in isolation.** Anything spawned from your shell (including
 `osascript … do shell script`) inherits the terminal's FDA via macOS's
 "responsible process" attribution, so it passes even when the daemon is
 denied. The only honest test is to have launchd run the binary, which is
-what the service does:
+what the service does. Restart it and check `/health`:
 
 ```bash
-B=/opt/homebrew/Cellar/imessage-edge/<version>/libexec/bin/imessage-edged
-launchctl submit -l fdatest -o /tmp/fdatest.out -e /tmp/fdatest.out -- "$B" -c \
-  "import sqlite3,os; print('FDA-OK', sqlite3.connect('file:'+os.path.expanduser('~/Library/Messages/chat.db')+'?mode=ro', uri=True).execute('select count(*) from message').fetchone()[0])"
-sleep 3; tail -1 /tmp/fdatest.out; launchctl remove fdatest
+brew services restart CupOfGeo/tap/imessage-edge
+TOKEN=$(sed -n 's/^IMESSAGE_EDGE_TOKEN=//p' /opt/homebrew/etc/imessage-edge/config.env)
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8765/health
 ```
 
-`FDA-OK <count>` means the grant is real; `unable to open database file`
-means it isn't (wrong row toggled, stale entry for an old Cellar path, or
-not added yet). No service restart is needed to run this. Once it passes,
-`brew services restart CupOfGeo/tap/imessage-edge` and check
-`/health` reports `chat_db_readable: true`.
+`"chat_db_readable": true` means the grant is real. `false` means it
+isn't (wrong row toggled, stale entry for an old Cellar path, or not
+added yet). Use your bind address if you changed `IMESSAGE_EDGE_BIND_HOST`.
+
+To confirm Python itself can't use the grant, run it under launchd
+directly. It must fail with `unable to open database file`:
+
+```bash
+P=/opt/homebrew/opt/imessage-edge/libexec/bin/python
+launchctl submit -l fdatest -o /tmp/fdatest.out -e /tmp/fdatest.out -- "$P" -c \
+  "import sqlite3,os; sqlite3.connect('file:'+os.path.expanduser('~/Library/Messages/chat.db')+'?mode=ro', uri=True).execute('select 1 from message')"
+sleep 3; tail -1 /tmp/fdatest.out; launchctl remove fdatest
+```
 
 ## Known issues
 
@@ -185,7 +179,3 @@ not added yet). No service restart is needed to run this. Once it passes,
   entry for the previous cellar version (different CDHash, brew can't
   clean these up). Manual cleanup: System Settings → FDA → click old
   entry → `−` button → authenticate.
-- **Tap and source repo are decoupled.** The GitHub `homebrew-tap`
-  repo holds the formula; this repo holds the source. Until the release
-  action updates the tap, bumping the source version means manually
-  updating the formula's `url` + `sha256` and pushing both repos.

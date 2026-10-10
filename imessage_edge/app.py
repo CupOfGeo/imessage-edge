@@ -36,6 +36,10 @@ def create_app() -> FastAPI:
             "orchestrator over Tailscale."
         ),
         lifespan=_lifespan,
+        # Schema pages would be served without the bearer check.
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
     )
     app.include_router(health.router)
     app.include_router(send.router)

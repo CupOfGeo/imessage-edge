@@ -2,9 +2,8 @@
 
 This file is the canonical schema for both directions: the HTTP API the
 daemon serves and the ``IncomingBatch`` it POSTs to the orchestrator.
-The running daemon also publishes it as ``/openapi.json``. Orchestrator
-implementations may vendor this file; treat any change here as a wire
-change and version accordingly.
+Orchestrator implementations may vendor this file; treat any change
+here as a wire change and version accordingly.
 """
 
 from __future__ import annotations
@@ -17,6 +16,10 @@ from pydantic import BaseModel, Field
 # The three transports Messages.app can send over. `service` on a send
 # request selects one; on rows and events it reports which one was used.
 IMessageService = Literal["iMessage", "SMS", "RCS"]
+
+# Upper bound on a send body. Far above a real text; stops an oversized
+# payload from reaching osascript's argv.
+MAX_BODY_CHARS = 10_000
 
 
 class HealthResponse(BaseModel):
@@ -33,7 +36,7 @@ class HealthResponse(BaseModel):
 
 class SendRequest(BaseModel):
     recipient: str
-    body: str
+    body: str = Field(max_length=MAX_BODY_CHARS)
     service: IMessageService = "iMessage"
     request_id: str = Field(
         description=(
@@ -64,7 +67,7 @@ class SendToChatRequest(BaseModel):
             "and targets that contact's most recently active direct chat."
         )
     )
-    body: str
+    body: str = Field(max_length=MAX_BODY_CHARS)
     request_id: str = Field(
         description="Caller-supplied UUID; idempotent for ~120s like /imessage/send."
     )
@@ -75,6 +78,8 @@ class SendErrorCode(str, Enum):
     UNKNOWN_PARTICIPANT = "unknown_participant"
     PERMISSION_DENIED = "permission_denied"
     CHAT_NOT_FOUND = "chat_not_found"
+    # request_id reused with a different request, or still in flight.
+    REQUEST_ID_CONFLICT = "request_id_conflict"
     INTERNAL = "internal"
 
 
